@@ -610,12 +610,127 @@
         const confirm = i.contentWindow.confirm.bind(window);
         i.remove();
         
+        function isReactStateNode(node) {
+            return (
+                node &&
+                typeof node === "object" &&
+                typeof node.setState === "function" &&
+                !node.nodeType
+            );
+        }
+
+        function findOwnerFromValue(value, seen, depth) {
+            if (!value || typeof value !== "object") return null;
+            seen = seen || new WeakSet();
+            depth = depth || 0;
+            if (seen.has(value) || value === window || value.nodeType || depth > 60) return null;
+            seen.add(value);
+
+            if (value._owner?.stateNode && isReactStateNode(value._owner.stateNode)) return value._owner;
+            if (isReactStateNode(value.stateNode)) return value;
+
+            if (Array.isArray(value)) {
+                for (const item of value) {
+                    const owner = findOwnerFromValue(item, seen, depth + 1);
+                    if (owner) return owner;
+                }
+            } else {
+                const keys = new Set();
+                for (const key of Object.keys(value)) keys.add(key);
+                for (const key of Object.getOwnPropertyNames(value)) keys.add(key);
+                for (const symbol of Object.getOwnPropertySymbols(value)) keys.add(symbol);
+                for (const key of keys) {
+                    let child;
+                    try {
+                        child = value[key];
+                    } catch {
+                        continue;
+                    }
+                    if (!child || (typeof child !== "object" && !Array.isArray(child))) continue;
+                    const owner = findOwnerFromValue(child, seen, depth + 1);
+                    if (owner) return owner;
+                }
+            }
+
+            return null;
+        }
+
+        function collectNodeValues(node) {
+            const values = [];
+            const seen = new Set();
+            const add = (value) => {
+                if (value && typeof value === "object" && !seen.has(value)) {
+                    seen.add(value);
+                    values.push(value);
+                }
+            };
+            const pushForKey = (key) => {
+                if (typeof key !== "string" || !key.startsWith("__react")) return;
+                try {
+                    add(node[key]);
+                } catch {}
+            };
+            try {
+                for (const key of Object.keys(node)) pushForKey(key);
+            } catch {}
+            try {
+                for (const key of Object.getOwnPropertyNames(node)) pushForKey(key);
+            } catch {}
+            try {
+                for (const symbol of Object.getOwnPropertySymbols(node)) add(node[symbol]);
+            } catch {}
+            return values;
+        }
+
+        function getReactOwner(root) {
+            const visited = new Set();
+            const queue = [root].filter(Boolean);
+            while (queue.length) {
+                const node = queue.shift();
+                if (!node || visited.has(node) || typeof node !== "object") continue;
+                visited.add(node);
+
+                for (const value of collectNodeValues(node)) {
+                    const owner = findOwnerFromValue(value);
+                    if (owner?.stateNode && isReactStateNode(owner.stateNode)) return owner;
+                }
+
+                const children = [];
+                if (node.children) children.push(...Array.from(node.children));
+                if (!node.children && node.childNodes)
+                    children.push(...Array.from(node.childNodes).filter((child) => child.nodeType === 1));
+                if (node.shadowRoot) children.push(node.shadowRoot);
+                queue.push(...children);
+            }
+            return null;
+        }
+
+        function legacyReactOwnerSearch() {
+            let current = document.querySelector("body > div");
+            while (current) {
+                for (const value of collectNodeValues(current)) {
+                    const owner = findOwnerFromValue(value);
+                    if (owner?.stateNode && isReactStateNode(owner.stateNode)) return owner;
+                }
+                current = current.querySelector(":scope > div");
+            }
+            return null;
+        }
+
         function getStateNode() {
-            return Object.values(
-                (function react(r = document.querySelector("body>div")) {
-                    return Object.values(r)[1]?.children?.[0]?._owner.stateNode ? r : react(r.querySelector(":scope>div"));
-                })()
-            )[1].children[0]._owner.stateNode;
+            const roots = [
+                document.querySelector("#app > div"),
+                document.querySelector("#app"),
+                document.querySelector("body > div"),
+                document.body,
+            ];
+            for (const root of roots) {
+                const owner = getReactOwner(root);
+                if (owner?.stateNode && isReactStateNode(owner.stateNode)) return owner.stateNode;
+            }
+            const fallbackOwner = legacyReactOwnerSearch();
+            if (fallbackOwner?.stateNode && isReactStateNode(fallbackOwner.stateNode)) return fallbackOwner.stateNode;
+            throw new Error("Unable to locate Blooket game state");
         }
         
         const Cheats = {
